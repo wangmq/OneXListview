@@ -1,16 +1,19 @@
 package com.youxiachai.onexlistview;
 
-import me.maxwin.view.IXListViewListener;
-import me.maxwin.view.OnXScrollListener;
+import me.maxwin.view.IXListViewLoadMore;
+import me.maxwin.view.IXListViewRefreshListener;
+import me.maxwin.view.IXScrollListener;
 import me.maxwin.view.XListViewFooter;
 import me.maxwin.view.XListViewHeader;
 import android.content.Context;
+import android.os.Handler;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewTreeObserver.OnGlobalLayoutListener;
 import android.view.animation.DecelerateInterpolator;
+import android.widget.ListAdapter;
 import android.widget.RelativeLayout;
 import android.widget.Scroller;
 import android.widget.TextView;
@@ -30,8 +33,8 @@ public class XMultiColumnListView extends MultiColumnListView implements
 	protected OnScrollListener mScrollListener; // user's scroll listener
 
 	// the interface to trigger refresh and load more.
-	protected IXListViewListener mListViewListener;
-
+	protected IXListViewLoadMore mLoadMore;
+	protected IXListViewRefreshListener mOnRefresh;
 	// -- header view
 	protected XListViewHeader mHeaderView;
 	// header view content, use it to calculate the Header's height. And hide it
@@ -81,7 +84,7 @@ public class XMultiColumnListView extends MultiColumnListView implements
 		initWithContext(context);
 	}
 
-	private void initWithContext(Context context) {
+	protected void initWithContext(Context context) {
 		mScroller = new Scroller(context, new DecelerateInterpolator());
 		// XListView need the scroll event, and it will dispatch the event to
 		// user's listener (as a proxy).
@@ -108,12 +111,14 @@ public class XMultiColumnListView extends MultiColumnListView implements
 								.removeGlobalOnLayoutListener(this);
 					}
 				});
-		// 补充修改
+		// 默认关闭所有操作
+		disablePullLoad();
+		disablePullRefreash();
 		// setPullRefreshEnable(mEnablePullRefresh);
 		// setPullLoadEnable(mEnablePullLoad);
 	}
 
-	protected void updateHeaderHeight(float delta) {
+	public void updateHeaderHeight(float delta) {
 		mHeaderView.setVisiableHeight((int) delta
 				+ mHeaderView.getVisiableHeight());
 		if (mEnablePullRefresh && !mPullRefreshing) { // 未处于刷新状态，更新箭头
@@ -127,8 +132,8 @@ public class XMultiColumnListView extends MultiColumnListView implements
 	}
 
 	protected void invokeOnScrolling() {
-		if (mScrollListener instanceof OnXScrollListener) {
-			OnXScrollListener l = (OnXScrollListener) mScrollListener;
+		if (mScrollListener instanceof IXScrollListener) {
+			IXScrollListener l = (IXScrollListener) mScrollListener;
 			l.onXScrolling(this);
 		}
 	}
@@ -139,8 +144,8 @@ public class XMultiColumnListView extends MultiColumnListView implements
 				&& !mPullLoading) {
 			mPullLoading = true;
 			mFooterView.setState(XListViewFooter.STATE_LOADING);
-			if (mListViewListener != null) {
-				mListViewListener.onLoadMore();
+			if (mLoadMore != null) {
+				mLoadMore.onLoadMore();
 			}
 		}
 	}
@@ -176,17 +181,20 @@ public class XMultiColumnListView extends MultiColumnListView implements
 		// make sure XListViewFooter is the last footer view, and only add once.
 		if (mIsFooterReady == false) {
 			// if not inflate screen ,footerview not add
-			if (getLastVisiblePosition() != (getAdapter().getCount() - 1)) {
-				mIsFooterReady = true;
-				addFooterView(mFooterView);
+			if(getAdapter() != null){
+				if (getLastVisiblePosition() != (getAdapter().getCount() - 1)) {
+					mIsFooterReady = true;
+					addFooterView(mFooterView);
+				}
 			}
+			
 		}
 	}
 
 	/**
 	 * reset header view's height.
 	 */
-	protected void resetHeaderHeight() {
+	public void resetHeaderHeight() {
 		int height = mHeaderView.getVisiableHeight();
 		if (height == 0) // not visible.
 			return;
@@ -206,19 +214,45 @@ public class XMultiColumnListView extends MultiColumnListView implements
 		// trigger computeScroll
 		invalidate();
 	}
+	
+	/* 
+	 * 神奇的bug....
+	 */
+	@Override
+	public void setAdapter(ListAdapter adapter) {
+		super.setAdapter(adapter);
+		
+		//莫名其妙的bug....
+		//updateHeaderHeight(10);
+		postDelayed(new Runnable() {
+			@Override
+			public void run() {
+			//	resetHeaderHeight();
+				mScroller.startScroll(0, 0, 0, 0,
+						SCROLL_DURATION);
+//				// trigger computeScroll
+				invalidate();
+			}
+		}, 100);
+		
+	}
 
 	/**
 	 * enable or disable pull down refresh feature.
 	 * 
 	 * @param enable
 	 */
-	public void setPullRefreshEnable(boolean enable) {
-		mEnablePullRefresh = enable;
-		if (!mEnablePullRefresh) { // disable, hide the content
-			mHeaderViewContent.setVisibility(View.INVISIBLE);
-		} else {
-			mHeaderViewContent.setVisibility(View.VISIBLE);
-		}
+	public void setPullRefreshEnable(IXListViewRefreshListener refreshListener) {
+		mEnablePullRefresh = true;
+		mHeaderViewContent.setVisibility(View.VISIBLE);
+		this.mOnRefresh = refreshListener;
+
+	}
+	
+	public void disablePullRefreash() {
+		mEnablePullRefresh = false;
+		// disable, hide the content
+		mHeaderViewContent.setVisibility(View.INVISIBLE);
 	}
 
 	/**
@@ -226,23 +260,26 @@ public class XMultiColumnListView extends MultiColumnListView implements
 	 * 
 	 * @param enable
 	 */
-	public void setPullLoadEnable(boolean enable) {
-		mEnablePullLoad = enable;
-		if (!mEnablePullLoad) {
-			mFooterView.hide();
-			mFooterView.setOnClickListener(null);
-		} else {
-			mPullLoading = false;
-			mFooterView.show();
-			mFooterView.setState(XListViewFooter.STATE_NORMAL);
-			// both "pull up" and "click" will invoke load more.
-			mFooterView.setOnClickListener(new OnClickListener() {
-				@Override
-				public void onClick(View v) {
-					startLoadMore();
-				}
-			});
-		}
+	public void setPullLoadEnable(IXListViewLoadMore loadMoreListener) {
+		mEnablePullLoad = true;
+		this.mLoadMore = loadMoreListener;
+		mPullLoading = false;
+		mFooterView.show();
+		mFooterView.setState(XListViewFooter.STATE_NORMAL);
+		// both "pull up" and "click" will invoke load more.
+		mFooterView.setOnClickListener(new OnClickListener() {
+			@Override
+			public void onClick(View v) {
+				startLoadMore();
+			}
+		});
+
+	}
+	
+	public void disablePullLoad() {
+		mEnablePullLoad = false;
+		mFooterView.hide();
+		mFooterView.setOnClickListener(null);
 	}
 
 	/**
@@ -257,9 +294,10 @@ public class XMultiColumnListView extends MultiColumnListView implements
 	/**
 	 * stop refresh, reset header view.
 	 */
-	public void stopRefresh() {
+	public void stopRefresh(String time) {
 		if (mPullRefreshing == true) {
 			mPullRefreshing = false;
+			mHeaderTimeView.setText(time);
 			resetHeaderHeight();
 		}
 	}
@@ -307,13 +345,16 @@ public class XMultiColumnListView extends MultiColumnListView implements
 			if (getFirstVisiblePosition() == 0
 					&& (mHeaderView.getVisiableHeight() > 0 || deltaY > 0)  && !mPullRefreshing) {
 				// the first item is showing, header has shown or pull down.
-				
+				if(mEnablePullRefresh){
 				updateHeaderHeight(deltaY / OFFSET_RADIO);
 				invokeOnScrolling();
+				}
 			} else if (getLastVisiblePosition() == mTotalItemCount - 1
 					&& (mFooterView.getBottomMargin() > 0 || deltaY < 0)  && !mPullLoading) {
 				// last item, already pulled up or want to pull up.
-				updateFooterHeight(-deltaY / OFFSET_RADIO);
+				if(mEnablePullLoad){
+					updateFooterHeight(-deltaY / OFFSET_RADIO);
+				}
 			}
 			break;
 		default:
@@ -339,8 +380,8 @@ public class XMultiColumnListView extends MultiColumnListView implements
 				&& !mPullRefreshing) {
 			mPullRefreshing = true;
 			mHeaderView.setState(XListViewHeader.STATE_REFRESHING);
-			if (mListViewListener != null) {
-				mListViewListener.onRefresh();
+			if (mOnRefresh != null) {
+				mOnRefresh.onRefresh();
 			}
 		}
 	}
@@ -368,8 +409,5 @@ public class XMultiColumnListView extends MultiColumnListView implements
 		mScrollListener = l;
 	}
 
-	public void setXListViewListener(IXListViewListener l) {
-		mListViewListener = l;
-	}
 
 }
